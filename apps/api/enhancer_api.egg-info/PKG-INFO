@@ -1,0 +1,28 @@
+Metadata-Version: 2.4
+Name: enhancer-api
+Version: 0.1.0
+Summary: Spreadsheet research agent backend
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+Requires-Dist: alembic>=1.14.0
+Requires-Dist: boto3>=1.35.0
+Requires-Dist: cryptography>=43.0.0
+Requires-Dist: dramatiq>=1.17.1
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: httpx>=0.28.0
+Requires-Dist: openpyxl>=3.1.5
+Requires-Dist: pandas>=2.2.3
+Requires-Dist: pydantic-settings>=2.6.1
+Requires-Dist: python-multipart>=0.0.20
+Requires-Dist: redis>=5.2.1
+Requires-Dist: sqlalchemy>=2.0.36
+Requires-Dist: uvicorn>=0.32.1
+Requires-Dist: xlrd>=2.0.1
+Provides-Extra: dev
+Requires-Dist: pytest>=8.3.4; extra == "dev"
+Requires-Dist: pytest-cov>=6.0.0; extra == "dev"
+Requires-Dist: ruff>=0.8.2; extra == "dev"
+
+# Enhancer API
+
+FastAPI backend for the spreadsheet research agent.

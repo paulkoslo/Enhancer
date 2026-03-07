@@ -1,0 +1,16 @@
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+node_modules/
+.next/
+dist/
+build/
+coverage/
+var/
+*.pyc
+*.pyo
+*.DS_Store
+apps/api/.env
+apps/web/.env.local
