@@ -16,6 +16,7 @@ import {
   updateDraftPlan,
   type RunRecord,
 } from "@/lib/api";
+import { AgentFlowModal } from "@/components/agent-flow-modal";
 import { DraftPlanEditor } from "@/components/draft-plan-editor";
 import { DryRunPanel } from "@/components/dry-run-panel";
 import { PlanCard } from "@/components/plan-card";
@@ -26,6 +27,7 @@ export function RunWorkspace({ initialRun }: { initialRun: RunRecord }) {
   const queryClient = useQueryClient();
   const [feedback, setFeedback] = useState("");
   const [actionError, setActionError] = useState<string | null>(null);
+  const [showAgentFlow, setShowAgentFlow] = useState(false);
 
   const runQuery = useQuery({
     queryKey: ["run", initialRun.id],
@@ -138,107 +140,125 @@ export function RunWorkspace({ initialRun }: { initialRun: RunRecord }) {
   return (
     <div className="grid two">
       <section className="panel stack">
-        <div className="stack">
-          <div className="status-chip">{run.status}</div>
-          <h2 className="panel-title">Run Workspace</h2>
-          <p className="panel-subtitle">
-            Review the plan, ask for changes, approve the dry run, and watch the research-first execution stream.
-          </p>
-        </div>
-        <DraftPlanEditor controls={run.draft_controls} onSubmit={(payload) => draftMutation.mutate(payload)} pending={draftMutation.isPending} />
-        <PlanCard draftPlan={run.draft_plan} approvedPlan={run.approved_plan} />
-        <div className="card stack">
-          <strong>Chat</strong>
-          <div className="list">
-            {run.messages.map((message) => (
-              <div className="card message-card" key={message.id}>
-                <div className="status-chip">{message.role}</div>
-                <div className="message-body">{message.content}</div>
-              </div>
-            ))}
+          <div className="stack">
+            <div className="status-chip">{run.status}</div>
+            <h2 className="panel-title">Run Workspace</h2>
+            <p className="panel-subtitle">
+              Review the plan, ask for changes, approve the dry run, and watch the research-first execution stream.
+            </p>
           </div>
-          <div className="field">
-            <label htmlFor="feedback">Refine The Plan</label>
-            <textarea id="feedback" value={feedback} onChange={(event) => setFeedback(event.target.value)} />
-          </div>
-          {actionError ? <div className="card" style={{ color: "var(--danger)" }}>{actionError}</div> : null}
-          <div className="button-row">
-            <button
-              className="secondary"
-              onClick={() => messageMutation.mutate()}
-              disabled={!feedback.trim() || messageMutation.isPending}
-            >
-              Send Feedback
-            </button>
-            <button className="primary" onClick={() => planApproveMutation.mutate()} disabled={!isAwaitingPlanApproval || planApproveMutation.isPending}>
-              Approve Plan
-            </button>
-            <button className="secondary" onClick={() => dryRunMutation.mutate()} disabled={!canStartDryRun || dryRunMutation.isPending}>
-              Start Dry Run
-            </button>
-            <button
-              className="secondary"
-              onClick={() => dryRunApproveMutation.mutate()}
-              disabled={!canApproveDryRun || dryRunApproveMutation.isPending}
-            >
-              Approve Dry Run
-            </button>
-            <button className="primary" onClick={() => executeMutation.mutate()} disabled={!canExecute || executeMutation.isPending}>
-              Execute Full Run
-            </button>
-          </div>
-        </div>
-        <div className="card stack">
-          <strong>Dry Run Results</strong>
-          <DryRunPanel results={dryRunResults} />
-        </div>
-      </section>
-      <aside className="panel stack">
-        <div className="stack">
-          <h2 className="panel-title">Live Events</h2>
-          <p className="panel-subtitle">Status changes, row progress, retries, and exports stream here.</p>
-        </div>
-        <RunEvents runId={run.id} initialEvents={run.latest_events} />
-        <div className="card stack">
-          <strong>Run Controls</strong>
-          <div className="button-row">
-            <button className="ghost" onClick={() => pauseMutation.mutate()} disabled={pauseMutation.isPending}>
-              Pause
-            </button>
-            <button className="ghost" onClick={() => retryMutation.mutate()} disabled={retryMutation.isPending}>
-              Retry Failed
-            </button>
-            <button className="ghost" onClick={() => cancelMutation.mutate()} disabled={cancelMutation.isPending}>
-              Cancel
-            </button>
-            {dryRunArtifact ? (
-              <a className="secondary" href={dryRunUrl}>
-                Download Dry Run
-              </a>
-            ) : null}
-            {outputArtifact ? (
-              <a className="primary" href={downloadUrl}>
-                Download Output
-              </a>
-            ) : null}
-          </div>
-        </div>
-        {run.artifacts.length ? (
+          <DraftPlanEditor
+            controls={run.draft_controls}
+            onSubmit={(payload) => draftMutation.mutate(payload)}
+            pending={draftMutation.isPending}
+          />
+          <PlanCard draftPlan={run.draft_plan} approvedPlan={run.approved_plan} />
           <div className="card stack">
-            <strong>Artifacts</strong>
+            <div className="agent-card-header">
+              <strong>Chat</strong>
+              <button className="ghost" onClick={() => setShowAgentFlow(true)} type="button">
+                View Agent Flow
+              </button>
+            </div>
+            <div className="card muted">
+              This chat updates the plan and assistant summary. Row-level AI research starts later during dry runs and full
+              execution.
+            </div>
             <div className="list">
-              {run.artifacts.map((artifact) => (
-                <div className="card" key={artifact.id}>
-                  <div className="status-chip">{artifact.kind}</div>
-                  <div className="muted" style={{ marginTop: 8 }}>
-                    {formatTimestamp(artifact.created_at)}
-                  </div>
+              {run.messages.map((message) => (
+                <div className="card message-card" key={message.id}>
+                  <div className="status-chip">{message.role}</div>
+                  <div className="message-body">{message.content}</div>
                 </div>
               ))}
             </div>
+            <div className="field">
+              <label htmlFor="feedback">Refine The Plan</label>
+              <textarea id="feedback" value={feedback} onChange={(event) => setFeedback(event.target.value)} />
+            </div>
+            {actionError ? <div className="card" style={{ color: "var(--danger)" }}>{actionError}</div> : null}
+            <div className="button-row">
+              <button
+                className="secondary"
+                onClick={() => messageMutation.mutate()}
+                disabled={!feedback.trim() || messageMutation.isPending}
+              >
+                Send Feedback
+              </button>
+              <button
+                className="primary"
+                onClick={() => planApproveMutation.mutate()}
+                disabled={!isAwaitingPlanApproval || planApproveMutation.isPending}
+              >
+                Approve Plan
+              </button>
+              <button className="secondary" onClick={() => dryRunMutation.mutate()} disabled={!canStartDryRun || dryRunMutation.isPending}>
+                Start Dry Run
+              </button>
+              <button
+                className="secondary"
+                onClick={() => dryRunApproveMutation.mutate()}
+                disabled={!canApproveDryRun || dryRunApproveMutation.isPending}
+              >
+                Approve Dry Run
+              </button>
+              <button className="primary" onClick={() => executeMutation.mutate()} disabled={!canExecute || executeMutation.isPending}>
+                Execute Full Run
+              </button>
+            </div>
           </div>
-        ) : null}
-      </aside>
+          <div className="card stack">
+            <strong>Dry Run Results</strong>
+            <DryRunPanel results={dryRunResults} />
+          </div>
+          <AgentFlowModal onClose={() => setShowAgentFlow(false)} open={showAgentFlow} run={run} />
+        </section>
+        <aside className="panel stack">
+          <div className="stack">
+            <h2 className="panel-title">Live Events</h2>
+            <p className="panel-subtitle">Status changes, row progress, retries, and exports stream here.</p>
+          </div>
+          <RunEvents runId={run.id} initialEvents={run.latest_events} />
+          <div className="card stack">
+            <strong>Run Controls</strong>
+            <div className="button-row">
+              <button className="ghost" onClick={() => pauseMutation.mutate()} disabled={pauseMutation.isPending}>
+                Pause
+              </button>
+              <button className="ghost" onClick={() => retryMutation.mutate()} disabled={retryMutation.isPending}>
+                Retry Failed
+              </button>
+              <button className="ghost" onClick={() => cancelMutation.mutate()} disabled={cancelMutation.isPending}>
+                Cancel
+              </button>
+              {dryRunArtifact ? (
+                <a className="secondary" href={dryRunUrl}>
+                  Download Dry Run
+                </a>
+              ) : null}
+              {outputArtifact ? (
+                <a className="primary" href={downloadUrl}>
+                  Download Output
+                </a>
+              ) : null}
+            </div>
+          </div>
+          {run.artifacts.length ? (
+            <div className="card stack">
+              <strong>Artifacts</strong>
+              <div className="list">
+                {run.artifacts.map((artifact) => (
+                  <div className="card" key={artifact.id}>
+                    <div className="status-chip">{artifact.kind}</div>
+                    <div className="muted" style={{ marginTop: 8 }}>
+                      {formatTimestamp(artifact.created_at)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </aside>
     </div>
   );
 }

@@ -149,5 +149,11 @@ describe("RunWorkspace", () => {
         enabled_output_fields: ["Website", "Industry", "Summary"],
       }));
     });
+
+    fireEvent.click(screen.getByRole("button", { name: /View Agent Flow/i }));
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText(/The visible assistant messages are composed in backend Python code/i)).toBeInTheDocument();
+    expect(screen.getByText(/Web Research via OpenRouter/i)).toBeInTheDocument();
   });
 });
