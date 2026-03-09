@@ -5,13 +5,10 @@ from io import BytesIO
 from fastapi.testclient import TestClient
 import pandas as pd
 
-from app.domain.execution.service import ExecutionService
-from app.domain.planning.service import PlanningBlueprint
-from app.domain.provider.openrouter import StructuredResearchResponse
-from app.domain.runs.types import OutputFieldDefinition, ResearchEvidenceRecord
+def _mock_research_response():
+    from app.domain.provider.openrouter import StructuredResearchResponse
+    from app.domain.runs.types import ResearchEvidenceRecord
 
-
-def _mock_research_response() -> StructuredResearchResponse:
     return StructuredResearchResponse(
         outputs={
             "Website": "https://example.com",
@@ -34,7 +31,9 @@ def _mock_research_response() -> StructuredResearchResponse:
     )
 
 
-def _mock_research_without_citations() -> StructuredResearchResponse:
+def _mock_research_without_citations():
+    from app.domain.provider.openrouter import StructuredResearchResponse
+
     return StructuredResearchResponse(
         outputs={
             "Website": "https://example.com",
@@ -49,7 +48,10 @@ def _mock_research_without_citations() -> StructuredResearchResponse:
     )
 
 
-def _mock_generate_ai_blueprint(self, session, **kwargs) -> PlanningBlueprint:
+def _mock_generate_ai_blueprint(self, session, **kwargs):
+    from app.domain.planning.service import PlanningBlueprint
+    from app.domain.runs.types import OutputFieldDefinition
+
     locked_output_fields = kwargs.get("locked_output_fields")
     feedback_history = kwargs.get("feedback_history", [])
     latest_feedback = " ".join(feedback_history).lower()
@@ -78,6 +80,7 @@ def _mock_generate_ai_blueprint(self, session, **kwargs) -> PlanningBlueprint:
 
 
 def test_upload_plan_dry_run_execute_flow(monkeypatch):
+    from app.domain.execution.service import ExecutionService
     from app.main import app
 
     execution = ExecutionService()
@@ -188,6 +191,7 @@ def test_upload_plan_dry_run_execute_flow(monkeypatch):
 
 
 def test_dry_run_soft_passes_when_citations_are_missing(monkeypatch):
+    from app.domain.execution.service import ExecutionService
     from app.main import app
 
     execution = ExecutionService()
