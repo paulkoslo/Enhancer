@@ -45,6 +45,18 @@ class ExecutionService:
 
     def start_dry_run(self, session: Session, *, run: RunRecord) -> None:
         run.status = RunStatus.DRY_RUN_PREPARING.value
+        self.events.emit(
+            session,
+            run_id=run.id,
+            event_type=RunEventType.STATUS,
+            message="Dry run queued.",
+            payload={
+                "status": run.status,
+                "task_label": "Dry run preparation",
+                "model_profile": run.selected_model_profile,
+                "model_id": run.selected_model_id,
+            },
+        )
         session.flush()
 
     def approve_dry_run(self, session: Session, *, run: RunRecord) -> None:
@@ -65,7 +77,12 @@ class ExecutionService:
             run_id=run.id,
             event_type=RunEventType.STATUS,
             message="Full run queued.",
-            payload={"status": run.status},
+            payload={
+                "status": run.status,
+                "task_label": "Full run queue",
+                "model_profile": run.selected_model_profile,
+                "model_id": run.selected_model_id,
+            },
         )
         session.flush()
 
@@ -108,7 +125,13 @@ class ExecutionService:
                         run_id=run_id,
                         event_type=RunEventType.STATUS,
                         message="Dry run started.",
-                        payload={"status": context.run.status},
+                        payload={
+                            "status": context.run.status,
+                            "task_label": "Sample row execution",
+                            "worker_count": 1,
+                            "model_profile": context.plan.model_profile,
+                            "model_id": context.plan.model_id,
+                        },
                     )
                     session.flush()
                     self._clear_existing_row_results(session, run_id=run_id)
@@ -117,19 +140,12 @@ class ExecutionService:
                     ).fillna("")
                     rows = dataframe.to_dict(orient="records")
                     for row_index in context.plan.sample_row_indices:
-                        payload = self._process_row(
+                        self._process_row(
                             session,
                             context=context,
                             row_index=row_index,
                             row_data=rows[row_index],
                             save=True,
-                        )
-                        self.events.emit(
-                            session,
-                            run_id=run_id,
-                            event_type=RunEventType.DRY_RUN,
-                            message=f"Dry-run row {row_index} completed.",
-                            payload={"row_index": row_index, "status": payload.status.value},
                         )
                     self._persist_dry_run_artifact(
                         session,
@@ -158,36 +174,34 @@ class ExecutionService:
                     return
                 with self.events.agent_step(session, run_id=run_id, agent="Execution", action="full_run"):
                     context.run.status = RunStatus.FULL_RUN_RUNNING.value
+                    max_workers = min(resolve_concurrency(context.plan.model_profile), 6)
+                    if self.settings.database_url.startswith("sqlite"):
+                        max_workers = 1
                     self.events.emit(
                         session,
                         run_id=run_id,
                         event_type=RunEventType.STATUS,
                         message="Full run started.",
-                        payload={"status": context.run.status},
+                        payload={
+                            "status": context.run.status,
+                            "task_label": "Full execution",
+                            "worker_count": max_workers,
+                            "model_profile": context.plan.model_profile,
+                            "model_id": context.plan.model_id,
+                        },
                     )
                     session.commit()
                     dataframe = self.workbooks.load_sheet_dataframe(
                         session, file_id=context.run.file_id, sheet_name=context.plan.sheet_name
                     ).fillna("")
                     rows = dataframe.to_dict(orient="records")
-                    max_workers = min(resolve_concurrency(context.plan.model_profile), 6)
-                    if self.settings.database_url.startswith("sqlite"):
-                        max_workers = 1
                     with ThreadPoolExecutor(max_workers=max_workers) as executor:
                         futures = {
                             executor.submit(self._process_row_in_new_session, run_id, row_index, row): row_index
                             for row_index, row in enumerate(rows)
                         }
                         for future in as_completed(futures):
-                            row_index = futures[future]
-                            payload = future.result()
-                            self.events.emit(
-                                session,
-                                run_id=run_id,
-                                event_type=RunEventType.ROW_PROGRESS,
-                                message=f"Row {row_index} completed.",
-                                payload={"row_index": row_index, "status": payload.status.value},
-                            )
+                            future.result()
                             session.commit()
                     context.run.status = RunStatus.EXPORTING.value
                     with self.events.agent_step(session, run_id=run_id, agent="Export", action="final_workbook"):
@@ -288,7 +302,12 @@ class ExecutionService:
                     run_id=context.run.id,
                     event_type=RunEventType.MODEL_OVERRIDE,
                     message="Model overridden to a web-research-capable profile.",
-                    payload={"row_index": row_index, "model_id": profile.model_id},
+                    payload={
+                        "row_index": row_index,
+                        "task_label": "Model override",
+                        "model_profile": profile.profile_id,
+                        "model_id": profile.model_id,
+                    },
                 )
             with self.events.agent_step(
                 session,
@@ -296,6 +315,11 @@ class ExecutionService:
                 agent="Web Research",
                 action="enrich_row",
                 row_index=row_index,
+                payload={
+                    "task_label": "Row enrichment",
+                    "model_profile": profile.profile_id,
+                    "model_id": profile.model_id,
+                },
             ):
                 outputs, evidence, raw_response = self.research.enrich_row(
                     api_key=context.api_key,
@@ -430,11 +454,32 @@ class ExecutionService:
                 payload={
                     "row_index": row_index,
                     "status": payload.status.value,
+                    "task_label": "Row enrichment",
+                    "model_profile": profile.profile_id,
+                    "model_id": profile.model_id,
+                    "usage": self._usage_payload(raw_response),
                     "warnings": payload.warnings,
                     "raw_response": raw_response,
                 },
             )
             session.flush()
+        return payload
+
+    @staticmethod
+    def _usage_payload(raw_response: dict[str, Any]) -> dict[str, int]:
+        usage = raw_response.get("usage")
+        if not isinstance(usage, dict):
+            return {}
+        payload: dict[str, int] = {}
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
+        total_tokens = usage.get("total_tokens")
+        if isinstance(input_tokens, (int, float)):
+            payload["input_tokens"] = int(input_tokens)
+        if isinstance(output_tokens, (int, float)):
+            payload["output_tokens"] = int(output_tokens)
+        if isinstance(total_tokens, (int, float)):
+            payload["total_tokens"] = int(total_tokens)
         return payload
 
     def _persist_dry_run_artifact(self, session: Session, *, run_id: str, file_id: str, sheet_name: str) -> str:

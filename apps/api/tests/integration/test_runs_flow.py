@@ -6,8 +6,9 @@ from fastapi.testclient import TestClient
 import pandas as pd
 
 from app.domain.execution.service import ExecutionService
+from app.domain.planning.service import PlanningBlueprint
 from app.domain.provider.openrouter import StructuredResearchResponse
-from app.domain.runs.types import ResearchEvidenceRecord
+from app.domain.runs.types import OutputFieldDefinition, ResearchEvidenceRecord
 
 
 def _mock_research_response() -> StructuredResearchResponse:
@@ -48,6 +49,34 @@ def _mock_research_without_citations() -> StructuredResearchResponse:
     )
 
 
+def _mock_generate_ai_blueprint(self, session, **kwargs) -> PlanningBlueprint:
+    locked_output_fields = kwargs.get("locked_output_fields")
+    feedback_history = kwargs.get("feedback_history", [])
+    latest_feedback = " ".join(feedback_history).lower()
+    if locked_output_fields:
+        output_fields = [field.model_copy(deep=True) for field in locked_output_fields]
+    elif "phone" in latest_feedback:
+        output_fields = [
+            OutputFieldDefinition(name="Website", description="Official company website"),
+            OutputFieldDefinition(name="Industry", description="Primary industry"),
+            OutputFieldDefinition(name="Phone Number", description="Main public company phone number"),
+        ]
+    else:
+        output_fields = [
+            OutputFieldDefinition(name="Website", description="Official company website"),
+            OutputFieldDefinition(name="Company Size", description="Approximate company size"),
+            OutputFieldDefinition(name="Industry", description="Primary industry"),
+            OutputFieldDefinition(name="Summary", description="Short company summary"),
+        ]
+    field_names = ", ".join(field.name for field in output_fields)
+    return PlanningBlueprint(
+        output_fields=output_fields,
+        prompt_template=f"Research the row and return: {field_names}. Include confidence.",
+        stricter_prompt_template=f"Be strict. Return only verified values for: {field_names}. Include confidence.",
+        assistant_response=f"Updated the plan to focus on: {field_names}.",
+    )
+
+
 def test_upload_plan_dry_run_execute_flow(monkeypatch):
     from app.main import app
 
@@ -59,6 +88,10 @@ def test_upload_plan_dry_run_execute_flow(monkeypatch):
     monkeypatch.setattr(
         "app.domain.provider.openrouter.OpenRouterClient.research_structured",
         lambda self, **kwargs: _mock_research_response(),
+    )
+    monkeypatch.setattr(
+        "app.domain.planning.service.PlanningService._generate_ai_blueprint",
+        _mock_generate_ai_blueprint,
     )
 
     csv_buffer = BytesIO()
@@ -109,10 +142,18 @@ def test_upload_plan_dry_run_execute_flow(monkeypatch):
 
         message_response = client.post(
             f"/api/runs/{run_id}/messages",
-            json={"content": "Keep the summaries concise and factual."},
+            json={"content": "I don't want summaries, I want a phone number."},
         )
         assert message_response.status_code == 200
         assert message_response.json()["messages"][-1]["role"] == "assistant"
+        assert message_response.json()["messages"][-1]["content"] == "Updated the plan to focus on: Website, Industry, Phone Number."
+        assert [field["name"] for field in message_response.json()["draft_plan"]["output_fields"]] == [
+            "Website",
+            "Industry",
+            "Phone Number",
+        ]
+        assert message_response.json()["task"] == "Research company website, company size, industry, and summary."
+        assert "Accepted refinements" not in message_response.json()["draft_plan"]["prompt_template"]
 
         assert client.post(f"/api/runs/{run_id}/plan/approve").status_code == 200
         dry_run_response = client.post(f"/api/runs/{run_id}/dry-run")
@@ -157,6 +198,10 @@ def test_dry_run_soft_passes_when_citations_are_missing(monkeypatch):
     monkeypatch.setattr(
         "app.domain.provider.openrouter.OpenRouterClient.research_structured",
         lambda self, **kwargs: _mock_research_without_citations(),
+    )
+    monkeypatch.setattr(
+        "app.domain.planning.service.PlanningService._generate_ai_blueprint",
+        _mock_generate_ai_blueprint,
     )
 
     csv_buffer = BytesIO()

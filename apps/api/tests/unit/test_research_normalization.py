@@ -40,3 +40,29 @@ def test_openrouter_parses_nested_citation_shapes():
         "https://example.com/about",
         "https://example.com/team",
     ]
+
+
+def test_openrouter_normalizes_object_schemas_for_strict_outputs():
+    schema = OpenRouterClient._normalize_json_schema(  # noqa: SLF001
+        {
+            "type": "object",
+            "properties": {
+                "output_fields": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                    },
+                },
+                "assistant_response": {"type": "string"},
+            },
+        }
+    )
+
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["output_fields", "assistant_response"]
+    assert schema["properties"]["output_fields"]["items"]["additionalProperties"] is False
+    assert schema["properties"]["output_fields"]["items"]["required"] == ["name", "description"]

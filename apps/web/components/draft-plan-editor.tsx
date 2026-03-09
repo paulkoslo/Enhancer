@@ -6,19 +6,33 @@ import type { DraftPlanControls } from "@/lib/api";
 
 type DraftPlanEditorProps = {
   controls?: DraftPlanControls | null;
+  promptTemplate?: string;
+  stricterPromptTemplate?: string;
   onSubmit: (payload: {
     sheet_name: string;
     enabled_output_fields: string[];
     model_profile: string;
     model_id?: string | null;
+    prompt_template?: string | null;
+    stricter_prompt_template?: string | null;
   }) => void;
   pending?: boolean;
+  variant?: "developer" | "user";
 };
 
-export function DraftPlanEditor({ controls, onSubmit, pending = false }: DraftPlanEditorProps) {
+export function DraftPlanEditor({
+  controls,
+  promptTemplate,
+  stricterPromptTemplate,
+  onSubmit,
+  pending = false,
+  variant = "developer",
+}: DraftPlanEditorProps) {
   const [sheetName, setSheetName] = useState("");
   const [enabledOutputFields, setEnabledOutputFields] = useState<string[]>([]);
   const [modelProfile, setModelProfile] = useState("");
+  const [editablePromptTemplate, setEditablePromptTemplate] = useState("");
+  const [editableStricterPromptTemplate, setEditableStricterPromptTemplate] = useState("");
 
   useEffect(() => {
     if (!controls) {
@@ -27,11 +41,22 @@ export function DraftPlanEditor({ controls, onSubmit, pending = false }: DraftPl
     setSheetName(controls.selected_sheet);
     setEnabledOutputFields(controls.enabled_output_fields);
     setModelProfile(controls.model_profile);
-  }, [controls]);
+    setEditablePromptTemplate(promptTemplate ?? "");
+    setEditableStricterPromptTemplate(stricterPromptTemplate ?? "");
+  }, [controls, promptTemplate, stricterPromptTemplate]);
 
   if (!controls) {
     return null;
   }
+
+  const isUserView = variant === "user";
+  const title = isUserView ? "Lauf anpassen" : "Draft Plan Controls";
+  const sheetLabel = isUserView ? "Blatt" : "Sheet";
+  const profileLabel = isUserView ? "Qualitätsprofil" : "Model Profile";
+  const outputFieldsLabel = isUserView ? "Gewünschte Ausgabefelder" : "Output Fields";
+  const promptLabel = isUserView ? "Anweisung" : "Prompt Template";
+  const strictPromptLabel = isUserView ? "Strengere Anweisung" : "Strict Prompt";
+  const submitLabel = isUserView ? "Änderungen übernehmen" : "Update Draft Plan";
 
   const toggleField = (fieldName: string) => {
     setEnabledOutputFields((current) =>
@@ -41,10 +66,10 @@ export function DraftPlanEditor({ controls, onSubmit, pending = false }: DraftPl
 
   return (
     <div className="card stack">
-      <strong>Draft Plan Controls</strong>
+      <strong>{title}</strong>
       <div className="form-grid compact">
         <div className="field">
-          <label htmlFor="draft-sheet">Sheet</label>
+          <label htmlFor="draft-sheet">{sheetLabel}</label>
           <select id="draft-sheet" value={sheetName} onChange={(event) => setSheetName(event.target.value)}>
             {controls.available_sheets.map((sheet) => (
               <option key={sheet} value={sheet}>
@@ -54,7 +79,7 @@ export function DraftPlanEditor({ controls, onSubmit, pending = false }: DraftPl
           </select>
         </div>
         <div className="field">
-          <label htmlFor="draft-model-profile">Model Profile</label>
+          <label htmlFor="draft-model-profile">{profileLabel}</label>
           <select
             id="draft-model-profile"
             value={modelProfile}
@@ -69,7 +94,7 @@ export function DraftPlanEditor({ controls, onSubmit, pending = false }: DraftPl
         </div>
       </div>
       <div className="field">
-        <label>Output Fields</label>
+        <label>{outputFieldsLabel}</label>
         <div className="checkbox-grid">
           {controls.available_output_fields.map((field) => {
             const checked = enabledOutputFields.includes(field.name);
@@ -93,6 +118,48 @@ export function DraftPlanEditor({ controls, onSubmit, pending = false }: DraftPl
           })}
         </div>
       </div>
+      {isUserView ? (
+        <details className="user-details">
+          <summary>Erweiterte Texte bearbeiten</summary>
+          <div className="form-grid user-collapsible-content">
+            <div className="field">
+              <label htmlFor="draft-prompt-template">{promptLabel}</label>
+              <textarea
+                id="draft-prompt-template"
+                value={editablePromptTemplate}
+                onChange={(event) => setEditablePromptTemplate(event.target.value)}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="draft-stricter-prompt-template">{strictPromptLabel}</label>
+              <textarea
+                id="draft-stricter-prompt-template"
+                value={editableStricterPromptTemplate}
+                onChange={(event) => setEditableStricterPromptTemplate(event.target.value)}
+              />
+            </div>
+          </div>
+        </details>
+      ) : (
+        <div className="form-grid">
+          <div className="field">
+            <label htmlFor="draft-prompt-template">{promptLabel}</label>
+            <textarea
+              id="draft-prompt-template"
+              value={editablePromptTemplate}
+              onChange={(event) => setEditablePromptTemplate(event.target.value)}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="draft-stricter-prompt-template">{strictPromptLabel}</label>
+            <textarea
+              id="draft-stricter-prompt-template"
+              value={editableStricterPromptTemplate}
+              onChange={(event) => setEditableStricterPromptTemplate(event.target.value)}
+            />
+          </div>
+        </div>
+      )}
       <div className="button-row">
         <button
           className="secondary"
@@ -103,11 +170,13 @@ export function DraftPlanEditor({ controls, onSubmit, pending = false }: DraftPl
               enabled_output_fields: enabledOutputFields,
               model_profile: modelProfile,
               model_id: controls.model_id,
+              prompt_template: editablePromptTemplate,
+              stricter_prompt_template: editableStricterPromptTemplate,
             })
           }
           type="button"
         >
-          Update Draft Plan
+          {submitLabel}
         </button>
       </div>
     </div>

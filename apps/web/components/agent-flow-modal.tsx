@@ -2,23 +2,9 @@
 
 import { useEffect } from "react";
 
+import { useViewMode } from "@/components/view-mode";
 import type { RunRecord } from "@/lib/api";
-
-const MERMAID_SOURCE = `flowchart TD
-  UI["RunWorkspace chat UI"] --> API["POST /api/runs/:run_id/messages"]
-  API --> ORCH["Orchestrator"]
-  ORCH --> TP["Task Planner (rule-based)"]
-  TP --> PS["Prompt/Schema builder"]
-  ORCH --> FA["File Analyst (sheet profiler)"]
-  PS --> PLAN["PlanVersion + assistant summary"]
-  FA --> PLAN
-  PLAN --> APPROVE["User approves plan"]
-  APPROVE --> EXEC["Execution worker"]
-  EXEC --> WR["Web Research via OpenRouter"]
-  WR --> VAL["Validation rules"]
-  VAL --> EXPORT["Export workbook"]
-  VAL -->|retryable| REC["Recovery retry"]
-  REC --> WR`;
+import { AGENT_FLOW_MERMAID, EXECUTION_LANE, PLANNING_LANE, type FlowNode } from "@/lib/agent-flow";
 
 type AgentFlowModalProps = {
   open: boolean;
@@ -26,74 +12,9 @@ type AgentFlowModalProps = {
   run?: RunRecord | null;
 };
 
-type FlowNode = {
-  title: string;
-  capability: "UI-only" | "Deterministic" | "AI-backed" | "Hybrid";
-  description: string;
-};
-
-const planningLane: FlowNode[] = [
-  {
-    title: "Chat UI",
-    capability: "UI-only",
-    description: "Sends task text and plan feedback to the runs API. No model call happens here.",
-  },
-  {
-    title: "Runs API",
-    capability: "Deterministic",
-    description: "Stores messages and forwards feedback into the planning service.",
-  },
-  {
-    title: "Orchestrator",
-    capability: "Deterministic",
-    description: "Coordinates create-run, feedback handling, approvals, and agent-step events.",
-  },
-  {
-    title: "Task Planner",
-    capability: "Deterministic",
-    description: "Infers output fields from keywords and rebuilds the structured run plan.",
-  },
-  {
-    title: "Prompt/Schema",
-    capability: "Deterministic",
-    description: "Builds prompt templates and the JSON output contract for row enrichment.",
-  },
-  {
-    title: "Assistant Message",
-    capability: "Deterministic",
-    description: "Writes the visible chat reply from string templates, not from an LLM response.",
-  },
-];
-
-const executionLane: FlowNode[] = [
-  {
-    title: "Execution Worker",
-    capability: "Deterministic",
-    description: "Starts dry runs and full runs, loads rows, and fans out processing.",
-  },
-  {
-    title: "Web Research",
-    capability: "AI-backed",
-    description: "Calls OpenRouter chat completions with the web plugin and a JSON schema.",
-  },
-  {
-    title: "Validation",
-    capability: "Deterministic",
-    description: "Checks website quality, missing fields, citations, and confidence thresholds.",
-  },
-  {
-    title: "Recovery",
-    capability: "Hybrid",
-    description: "Decides when to retry and then triggers a stricter second AI research pass.",
-  },
-  {
-    title: "Export",
-    capability: "Deterministic",
-    description: "Writes dry-run workbooks and final output files from stored row results.",
-  },
-];
-
 export function AgentFlowModal({ open, onClose, run }: AgentFlowModalProps) {
+  const { mode } = useViewMode();
+
   useEffect(() => {
     if (!open) {
       return;
@@ -120,6 +41,64 @@ export function AgentFlowModal({ open, onClose, run }: AgentFlowModalProps) {
       run.selected_model_profile
     : null;
 
+  if (mode === "user") {
+    return (
+      <div aria-modal="true" className="modal-backdrop" onClick={onClose} role="dialog">
+        <div className="modal-card stack" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-header">
+            <div className="stack-tight">
+              <div className="eyebrow">So funktioniert's</div>
+              <h2 className="panel-title">Der Lauf arbeitet in klaren Schritten.</h2>
+              <p className="panel-subtitle">
+                Die User View zeigt nur das Wesentliche. Im Hintergrund bleibt dieselbe Logik aktiv wie in der
+                Entwickleransicht.
+              </p>
+            </div>
+            <button className="ghost" onClick={onClose} type="button">
+              Schließen
+            </button>
+          </div>
+
+          <div className="agent-summary-grid">
+            <div className="card stack-tight">
+              <strong>1. Verstehen</strong>
+              <div className="muted">Ihre Datei wird gelesen, das passende Blatt erkannt und ein Plan vorbereitet.</div>
+            </div>
+            <div className="card stack-tight">
+              <strong>2. Testen</strong>
+              <div className="muted">Ein kleiner Testlauf prüft, ob die vorgeschlagenen Ergebnisse sinnvoll sind.</div>
+            </div>
+            <div className="card stack-tight">
+              <strong>3. Ausführen</strong>
+              <div className="muted">Nach Ihrer Freigabe wird der komplette Lauf im Hintergrund fertig verarbeitet.</div>
+            </div>
+          </div>
+
+          <div className="card stack">
+            <strong>Aktueller Kontext</strong>
+            {run ? (
+              <div className="stack-tight">
+                <div className="muted">Status: {run.status}</div>
+                <div className="muted">Modus: {run.execution_mode}</div>
+                <div className="muted">Ausgewähltes Modell: {selectedModel ?? "Automatisch"}</div>
+              </div>
+            ) : (
+              <div className="muted">Diese Hilfe gilt für die gesamte App und passt sich dem aktuellen Lauf an.</div>
+            )}
+          </div>
+
+          <div className="card stack-tight">
+            <strong>Wichtig zu wissen</strong>
+            <div className="muted">
+              Die vereinfachte Ansicht blendet technische Details aus. Im Entwickler-Modus sehen Sie weiterhin die
+              komplette Architektur, Ereignisse und Prompt-Details.
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       aria-modal="true"
@@ -136,8 +115,8 @@ export function AgentFlowModal({ open, onClose, run }: AgentFlowModalProps) {
             <div className="eyebrow">Agent Flow</div>
             <h2 className="panel-title">What this chat actually does</h2>
             <p className="panel-subtitle">
-              The chat panel refines a structured run plan. The only model-backed step in the live run path is row-level
-              web research, with retries reusing the same provider.
+              The chat panel now always uses the fast planning model for plan adaptation, while execution keeps the
+              heavier research model for row-level web research.
             </p>
           </div>
           <button className="ghost" onClick={onClose} type="button">
@@ -164,13 +143,15 @@ export function AgentFlowModal({ open, onClose, run }: AgentFlowModalProps) {
           <div className="card stack-tight">
             <strong>Most important finding</strong>
             <div className="muted">
-              The visible assistant messages are composed in backend Python code. They are not direct LLM chat turns.
+              Chat replies, output fields, and prompt templates now come from the planning model instead of backend
+              string templates.
             </div>
           </div>
           <div className="card stack-tight">
             <strong>AI capability boundary</strong>
             <div className="muted">
-              AI begins inside Web Research, where the backend sends prompts to OpenRouter with web search enabled.
+              AI can begin inside Task Planner during chat refinement, and continues inside Web Research during row
+              execution.
             </div>
           </div>
         </div>
@@ -187,21 +168,21 @@ export function AgentFlowModal({ open, onClose, run }: AgentFlowModalProps) {
           <section className="card stack-tight">
             <strong>Planning lane</strong>
             <div className="agent-track">
-              {planningLane.map((node, index) => (
-                <FlowNodeCard index={index} key={node.title} node={node} total={planningLane.length} />
+              {PLANNING_LANE.map((node, index) => (
+                <FlowNodeCard index={index} key={node.title} node={node} total={PLANNING_LANE.length} />
               ))}
             </div>
             <div className="card muted">
-              File Analyst is a parallel planning helper: it profiles the selected sheet and generates the first assistant
-              summary shown in chat.
+              File Analyst is a parallel planning helper: it profiles the sheet and feeds context into the planner, but
+              the visible assistant reply now comes from the planning model.
             </div>
           </section>
 
           <section className="card stack-tight">
             <strong>Execution lane</strong>
             <div className="agent-track">
-              {executionLane.map((node, index) => (
-                <FlowNodeCard index={index} key={node.title} node={node} total={executionLane.length} />
+              {EXECUTION_LANE.map((node, index) => (
+                <FlowNodeCard index={index} key={node.title} node={node} total={EXECUTION_LANE.length} />
               ))}
             </div>
             <div className="card muted">
@@ -213,7 +194,7 @@ export function AgentFlowModal({ open, onClose, run }: AgentFlowModalProps) {
 
         <div className="card stack">
           <strong>Mermaid Source</strong>
-          <pre className="code-block">{MERMAID_SOURCE}</pre>
+          <pre className="code-block">{AGENT_FLOW_MERMAID}</pre>
         </div>
 
         <div className="card stack-tight">
@@ -222,6 +203,13 @@ export function AgentFlowModal({ open, onClose, run }: AgentFlowModalProps) {
             Advanced sandbox mode exists as a service shell, but the present run path does not generate code, tests, or
             a separate coding agent during planning or execution.
           </div>
+        </div>
+
+        <div className="card stack-tight">
+          <strong>Prompt Sources</strong>
+          <div className="muted">Planning model system prompt: `apps/api/app/domain/planning/service.py`</div>
+          <div className="muted">Web research system prompt: `apps/api/app/domain/research/service.py`</div>
+          <div className="muted">Execution prompt template builder: `apps/api/app/domain/planning/service.py`</div>
         </div>
       </div>
     </div>

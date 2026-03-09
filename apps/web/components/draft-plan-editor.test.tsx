@@ -39,14 +39,21 @@ describe("DraftPlanEditor", () => {
           model_profile: "best-quality",
           model_id: null,
         }}
+        promptTemplate="Prompt"
+        stricterPromptTemplate="Strict prompt"
         onSubmit={onSubmit}
       />,
     );
 
     expect(screen.getByText("Website")).toBeInTheDocument();
     expect(screen.getByText("Official company website URL.")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Prompt")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Strict prompt")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Update Draft Plan/i }));
-    expect(onSubmit).toHaveBeenCalled();
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      prompt_template: "Prompt",
+      stricter_prompt_template: "Strict prompt",
+    }));
   });
 });

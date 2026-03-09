@@ -65,7 +65,7 @@ def _serialize_run(session: Session, run: RunRecord) -> RunResponse:
         approved_plan=approved_plan,
         draft_controls=DraftPlanControlsResponse(
             available_sheets=available_sheets,
-            available_output_fields=planning.get_available_output_fields(),
+            available_output_fields=planning.get_available_output_fields(draft_plan or approved_plan),
             available_model_profiles=list_profiles(),
             selected_sheet=(draft_plan.sheet_name if draft_plan else run.selected_sheet),
             enabled_output_fields=[field.name for field in (draft_plan.output_fields if draft_plan else [])],
@@ -109,15 +109,18 @@ def _get_run_or_404(session: Session, run_id: str) -> RunRecord:
 
 @router.post("", response_model=RunResponse)
 def create_run(payload: CreateRunRequest, session: Session = Depends(get_session)) -> RunResponse:
-    result = planning.create_run(
-        session,
-        file_id=payload.file_id,
-        task=payload.task,
-        sheet_name=payload.sheet_name,
-        requested_model_profile=payload.requested_model_profile,
-        requested_model_id=payload.requested_model_id,
-        advanced_mode=payload.advanced_mode,
-    )
+    try:
+        result = planning.create_run(
+            session,
+            file_id=payload.file_id,
+            task=payload.task,
+            sheet_name=payload.sheet_name,
+            requested_model_profile=payload.requested_model_profile,
+            requested_model_id=payload.requested_model_id,
+            advanced_mode=payload.advanced_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     session.commit()
     session.refresh(result.run)
     return _serialize_run(session, result.run)
@@ -136,7 +139,10 @@ def add_run_message(
     session: Session = Depends(get_session),
 ) -> RunResponse:
     run = _get_run_or_404(session, run_id)
-    planning.add_message(session, run=run, content=payload.content)
+    try:
+        planning.add_message(session, run=run, content=payload.content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     session.commit()
     return _serialize_run(session, run)
 
@@ -148,14 +154,19 @@ def update_draft_plan(
     session: Session = Depends(get_session),
 ) -> RunResponse:
     run = _get_run_or_404(session, run_id)
-    planning.update_draft_plan(
-        session,
-        run=run,
-        sheet_name=payload.sheet_name,
-        enabled_output_fields=payload.enabled_output_fields,
-        model_profile=payload.model_profile,
-        model_id=payload.model_id,
-    )
+    try:
+        planning.update_draft_plan(
+            session,
+            run=run,
+            sheet_name=payload.sheet_name,
+            enabled_output_fields=payload.enabled_output_fields,
+            model_profile=payload.model_profile,
+            model_id=payload.model_id,
+            prompt_template=payload.prompt_template,
+            stricter_prompt_template=payload.stricter_prompt_template,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     session.commit()
     return _serialize_run(session, run)
 

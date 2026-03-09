@@ -23,6 +23,11 @@ class StructuredResearchResponse(BaseModel):
     raw_response: dict[str, Any]
 
 
+class StructuredJsonResponse(BaseModel):
+    data: dict[str, Any]
+    raw_response: dict[str, Any]
+
+
 class OpenRouterClient:
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -52,6 +57,39 @@ class OpenRouterClient:
         user_prompt: str,
         json_schema: dict[str, Any],
     ) -> StructuredResearchResponse:
+        structured = self.structured_json(
+            api_key=api_key,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            json_schema=json_schema,
+            plugin_ids=["web"],
+        )
+        raw = structured.raw_response
+        message = raw["choices"][0]["message"]
+        outputs = structured.data
+        citations = self._parse_citations(message=message, raw_response=raw)
+        summary = str(outputs.get("summary", ""))
+        confidence = float(outputs.get("confidence", 0.5))
+        return StructuredResearchResponse(
+            outputs=outputs,
+            summary=summary,
+            confidence=confidence,
+            citations=citations,
+            raw_response=raw,
+        )
+
+    def structured_json(
+        self,
+        *,
+        api_key: str,
+        model: ModelProfile,
+        system_prompt: str,
+        user_prompt: str,
+        json_schema: dict[str, Any],
+        plugin_ids: list[str] | None = None,
+    ) -> StructuredJsonResponse:
+        strict_schema = self._normalize_json_schema(json_schema)
         payload = {
             "model": model.model_id,
             "messages": [
@@ -60,10 +98,15 @@ class OpenRouterClient:
             ],
             "response_format": {
                 "type": "json_schema",
-                "json_schema": {"name": "enhancement_result", "schema": json_schema},
+                "json_schema": {
+                    "name": "enhancement_result",
+                    "strict": True,
+                    "schema": strict_schema,
+                },
             },
-            "plugins": [{"id": "web"}],
         }
+        if plugin_ids:
+            payload["plugins"] = [{"id": plugin_id} for plugin_id in plugin_ids]
         headers = {
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": self.settings.openrouter_site_url,
@@ -82,17 +125,7 @@ class OpenRouterClient:
         content = message.get("content", "{}")
         if isinstance(content, list):
             content = "".join(chunk.get("text", "") for chunk in content if isinstance(chunk, dict))
-        outputs = self._parse_json(content)
-        citations = self._parse_citations(message=message, raw_response=raw)
-        summary = str(outputs.get("summary", ""))
-        confidence = float(outputs.get("confidence", 0.5))
-        return StructuredResearchResponse(
-            outputs=outputs,
-            summary=summary,
-            confidence=confidence,
-            citations=citations,
-            raw_response=raw,
-        )
+        return StructuredJsonResponse(data=self._parse_json(content), raw_response=raw)
 
     @staticmethod
     def _parse_json(content: str) -> dict[str, Any]:
@@ -101,6 +134,36 @@ class OpenRouterClient:
             cleaned = cleaned.strip("`")
             cleaned = cleaned.split("\n", 1)[-1]
         return json.loads(cleaned)
+
+    @classmethod
+    def _normalize_json_schema(cls, schema: dict[str, Any]) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
+        for key, value in schema.items():
+            if key in {"properties", "$defs", "definitions"} and isinstance(value, dict):
+                normalized[key] = {
+                    nested_key: cls._normalize_json_schema(nested_schema)
+                    if isinstance(nested_schema, dict)
+                    else nested_schema
+                    for nested_key, nested_schema in value.items()
+                }
+                continue
+            if key in {"items", "additionalProperties"} and isinstance(value, dict):
+                normalized[key] = cls._normalize_json_schema(value)
+                continue
+            if key in {"anyOf", "allOf", "oneOf"} and isinstance(value, list):
+                normalized[key] = [
+                    cls._normalize_json_schema(item) if isinstance(item, dict) else item for item in value
+                ]
+                continue
+            normalized[key] = value
+
+        properties = normalized.get("properties")
+        schema_type = normalized.get("type")
+        if isinstance(properties, dict) and (schema_type == "object" or schema_type is None):
+            normalized["type"] = "object"
+            normalized["additionalProperties"] = False
+            normalized["required"] = list(properties.keys())
+        return normalized
 
     @staticmethod
     def _parse_citations(message: dict[str, Any], raw_response: dict[str, Any]) -> list[ResearchEvidenceRecord]:

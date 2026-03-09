@@ -18,8 +18,8 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
     "balanced": ModelProfile(
         profile_id="balanced",
         provider="openrouter",
-        model_id="openai/gpt-5.4-mini",
-        display_name="OpenAI GPT-5.4 Mini",
+        model_id="openai/gpt-5-mini",
+        display_name="OpenAI GPT- Mini",
         supports_web_research=True,
         supports_structured_output=True,
         cost_tier="medium",

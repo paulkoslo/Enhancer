@@ -27,6 +27,8 @@ class UpdateDraftPlanRequest(BaseModel):
     enabled_output_fields: list[str] | None = None
     model_profile: str | None = None
     model_id: str | None = None
+    prompt_template: str | None = None
+    stricter_prompt_template: str | None = None
 
 
 class RunMessageResponse(BaseModel):

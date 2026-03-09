@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -13,6 +14,7 @@ from app.domain.events.service import EventService
 from app.domain.provider.openrouter import OpenRouterClient
 from app.domain.runs.types import ExecutionMode, MessageRole, OutputFieldDefinition, RunEventType
 from app.domain.runs.types import RunPlan, RunStatus
+from app.domain.settings.service import SettingsService
 from app.domain.workbooks.service import WorkbookService
 
 
@@ -63,6 +65,8 @@ ADDITION_PATTERNS = (
     "need",
 )
 
+PLANNING_MODEL_PROFILE = "balanced"
+
 
 @dataclass(slots=True)
 class PlanningResult:
@@ -71,12 +75,26 @@ class PlanningResult:
     model_overridden: bool
 
 
+@dataclass(slots=True)
+class BuiltPlanResult:
+    plan: RunPlan
+    assistant_response: str
+
+
+class PlanningBlueprint(BaseModel):
+    output_fields: list[OutputFieldDefinition] = Field(default_factory=list)
+    prompt_template: str
+    stricter_prompt_template: str
+    assistant_response: str
+
+
 class PlanningService:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.workbooks = WorkbookService()
         self.events = EventService()
         self.provider = OpenRouterClient()
+        self.settings_service = SettingsService()
 
     def create_run(
         self,
@@ -118,8 +136,16 @@ class PlanningService:
         session.flush()
         with self.events.agent_step(session, run_id=run.id, agent="Orchestrator", action="create_run"):
             session.add(RunMessage(run_id=run.id, role=MessageRole.USER.value, content=task))
-            with self.events.agent_step(session, run_id=run.id, agent="Task Planner", action="draft_plan"):
-                plan = self._build_plan(
+            with self.events.agent_step(session, run_id=run.id, agent="File Analyst", action="profile_sheet"):
+                file_analysis_summary = self._build_file_analysis_summary(session, file_id=file_id, sheet_name=selected_sheet)
+            with self.events.agent_step(
+                session,
+                run_id=run.id,
+                agent="Task Planner",
+                action="draft_plan",
+                payload=self._planning_event_payload(task_label="Initial plan draft"),
+            ):
+                built_plan = self._build_plan(
                     session,
                     run=run,
                     task=task,
@@ -127,15 +153,15 @@ class PlanningService:
                     requested_model_profile=profile.profile_id,
                     requested_model_id=profile.model_id,
                     model_overridden=model_overridden,
+                    file_analysis_summary=file_analysis_summary,
                 )
+                plan = built_plan.plan
             self._save_plan_version(session, run_id=run.id, plan=plan)
-            with self.events.agent_step(session, run_id=run.id, agent="File Analyst", action="profile_sheet"):
-                summary = self._build_file_analysis_summary(session, file_id=file_id, sheet_name=selected_sheet)
             session.add(
                 RunMessage(
                     run_id=run.id,
                     role=MessageRole.ASSISTANT.value,
-                    content=summary,
+                    content=built_plan.assistant_response,
                 )
             )
             run.status = RunStatus.AWAITING_PLAN_APPROVAL.value
@@ -160,26 +186,37 @@ class PlanningService:
             session.add(RunMessage(run_id=run.id, role=MessageRole.USER.value, content=content))
             latest = self.get_latest_plan(session, run.id)
             selected_sheet = latest.sheet_name if latest else run.selected_sheet
-            selected_fields = latest.output_fields if latest else None
-            composed_task = self._compose_task_text(run=run, feedback=content)
-            updated_fields, changes = self._apply_feedback_to_output_fields(selected_fields or [], content)
-            with self.events.agent_step(session, run_id=run.id, agent="Task Planner", action="refine_plan"):
-                plan = self._build_plan(
+            selected_fields = latest.output_fields if latest else []
+            updated_metadata = self._append_feedback_history(run.metadata_json, content)
+            feedback_history = self._get_feedback_history(updated_metadata)
+            updated_fields, changes = self._apply_feedback_to_output_fields(selected_fields, content)
+            with self.events.agent_step(
+                session,
+                run_id=run.id,
+                agent="Task Planner",
+                action="refine_plan",
+                payload=self._planning_event_payload(task_label="Plan refinement"),
+            ):
+                built_plan = self._build_plan(
                     session,
                     run=run,
-                    task=composed_task,
+                    task=run.task,
                     selected_sheet=selected_sheet,
                     requested_model_profile=(latest.model_profile if latest else run.selected_model_profile),
                     requested_model_id=(latest.model_id if latest else run.selected_model_id),
                     model_overridden=False,
-                    selected_output_fields=updated_fields,
+                    current_output_fields=selected_fields,
+                    fallback_output_fields=updated_fields,
+                    feedback_history=feedback_history,
                 )
+                plan = built_plan.plan
+            changes = self._describe_output_field_changes(before=selected_fields, after=plan.output_fields)
             self._save_plan_version(session, run_id=run.id, plan=plan)
             run.status = RunStatus.AWAITING_PLAN_APPROVAL.value
             run.selected_sheet = plan.sheet_name
             run.selected_model_profile = plan.model_profile
             run.selected_model_id = plan.model_id
-            run.metadata_json = self._append_feedback_history(run.metadata_json, content)
+            run.metadata_json = updated_metadata
             self.events.emit(
                 session,
                 run_id=run.id,
@@ -191,7 +228,7 @@ class PlanningService:
                 RunMessage(
                     run_id=run.id,
                     role=MessageRole.ASSISTANT.value,
-                    content=self._build_feedback_confirmation(changes=changes, plan=plan),
+                    content=built_plan.assistant_response,
                 )
             )
             session.flush()
@@ -206,6 +243,8 @@ class PlanningService:
         enabled_output_fields: list[str] | None,
         model_profile: str | None,
         model_id: str | None,
+        prompt_template: str | None = None,
+        stricter_prompt_template: str | None = None,
     ) -> RunPlan:
         with self.events.agent_step(session, run_id=run.id, agent="Orchestrator", action="patch_draft_plan"):
             latest = self.get_latest_plan(session, run.id)
@@ -218,16 +257,37 @@ class PlanningService:
                 requested_model_id=requested_model_id,
                 require_web_research=True,
             )
-            with self.events.agent_step(session, run_id=run.id, agent="Task Planner", action="patch_draft"):
-                plan = self._build_plan(
+            resolved_fields = self._resolve_output_fields(enabled_output_fields, fallback=latest.output_fields)
+            with self.events.agent_step(
+                session,
+                run_id=run.id,
+                agent="Task Planner",
+                action="patch_draft",
+                payload=self._planning_event_payload(task_label="Draft plan update"),
+            ):
+                built_plan = self._build_plan(
                     session,
                     run=run,
-                    task=latest.task,
+                    task=run.task,
                     selected_sheet=sheet_name or latest.sheet_name,
                     requested_model_profile=profile.profile_id,
                     requested_model_id=profile.model_id,
                     model_overridden=model_overridden,
-                    selected_output_fields=self._resolve_output_fields(enabled_output_fields, fallback=latest.output_fields),
+                    current_output_fields=latest.output_fields,
+                    fallback_output_fields=resolved_fields,
+                    lock_output_fields=True,
+                    feedback_history=self._get_feedback_history(run.metadata_json),
+                )
+                plan = built_plan.plan
+            if prompt_template is not None or stricter_prompt_template is not None:
+                plan = plan.model_copy(
+                    update={
+                        "prompt_template": self._normalize_prompt_text(prompt_template, fallback=plan.prompt_template),
+                        "stricter_prompt_template": self._normalize_prompt_text(
+                            stricter_prompt_template,
+                            fallback=plan.stricter_prompt_template,
+                        ),
+                    }
                 )
             self._save_plan_version(session, run_id=run.id, plan=plan)
             run.selected_sheet = plan.sheet_name
@@ -303,36 +363,222 @@ class PlanningService:
         requested_model_profile: str,
         requested_model_id: str | None,
         model_overridden: bool,
-        selected_output_fields: list[OutputFieldDefinition] | None = None,
-    ) -> RunPlan:
+        current_output_fields: list[OutputFieldDefinition] | None = None,
+        fallback_output_fields: list[OutputFieldDefinition] | None = None,
+        lock_output_fields: bool = False,
+        feedback_history: list[str] | None = None,
+        file_analysis_summary: str | None = None,
+    ) -> BuiltPlanResult:
         sheet = next(
             sheet for sheet in self.workbooks.list_sheets(session, run.file_id) if sheet.sheet_name == selected_sheet
         )
-        output_fields = selected_output_fields or self._infer_output_fields(task)
+        feedback_history = feedback_history or []
+        fallback_fields = fallback_output_fields or current_output_fields or self._infer_output_fields(task)
+        ai_blueprint = self._generate_ai_blueprint(
+            session,
+            task=task,
+            selected_sheet=selected_sheet,
+            sheet_profile=sheet.profile_json,
+            preview_rows=sheet.preview_json,
+            current_output_fields=current_output_fields or fallback_fields,
+            locked_output_fields=fallback_fields if lock_output_fields else None,
+            feedback_history=feedback_history,
+            file_analysis_summary=file_analysis_summary,
+        )
+        output_fields = fallback_fields if lock_output_fields else ai_blueprint.output_fields
         input_columns = self._infer_input_columns(sheet.profile_json)
         sample_row_indices = self._pick_sample_rows(sheet.preview_json)
         with self.events.agent_step(session, run_id=run.id, agent="Prompt/Schema", action="build_prompt_bundle"):
-            prompt_template = self._build_prompt(task=task, output_fields=output_fields, stricter=False)
-            stricter_prompt = self._build_prompt(task=task, output_fields=output_fields, stricter=True)
+            prompt_template = ai_blueprint.prompt_template.strip()
+            stricter_prompt = ai_blueprint.stricter_prompt_template.strip()
         notes = [
             "Research is mandatory for this enrichment task.",
             "Model-native web search is used through OpenRouter.",
+            "AI planning uses the fast planning model profile.",
         ]
         if model_overridden:
             notes.append("Selected model was overridden to a web-research-capable profile.")
-        return RunPlan(
-            execution_mode=ExecutionMode(run.execution_mode),
-            sheet_name=selected_sheet,
-            task=task,
-            input_columns=input_columns,
-            output_fields=output_fields,
-            prompt_template=prompt_template,
-            stricter_prompt_template=stricter_prompt,
-            model_profile=requested_model_profile,
-            model_id=requested_model_id,
-            sample_row_indices=sample_row_indices,
-            notes=notes,
+        return BuiltPlanResult(
+            plan=RunPlan(
+                execution_mode=ExecutionMode(run.execution_mode),
+                sheet_name=selected_sheet,
+                task=task,
+                input_columns=input_columns,
+                output_fields=output_fields,
+                prompt_template=prompt_template,
+                stricter_prompt_template=stricter_prompt,
+                model_profile=requested_model_profile,
+                model_id=requested_model_id,
+                sample_row_indices=sample_row_indices,
+                notes=notes,
+            ),
+            assistant_response=ai_blueprint.assistant_response.strip(),
         )
+
+    def _planning_event_payload(self, *, task_label: str) -> dict[str, Any]:
+        model, _ = self.provider.resolve_model(
+            requested_profile=PLANNING_MODEL_PROFILE,
+            requested_model_id=None,
+            require_web_research=False,
+        )
+        return {
+            "task_label": task_label,
+            "model_profile": model.profile_id,
+            "model_id": model.model_id,
+        }
+
+    def _normalize_prompt_text(self, value: str | None, *, fallback: str) -> str:
+        if value is None:
+            return fallback
+        cleaned = value.strip()
+        return cleaned or fallback
+
+    def _generate_ai_blueprint(
+        self,
+        session: Session,
+        *,
+        task: str,
+        selected_sheet: str,
+        sheet_profile: dict[str, Any],
+        preview_rows: list[dict[str, Any]],
+        current_output_fields: list[OutputFieldDefinition],
+        locked_output_fields: list[OutputFieldDefinition] | None,
+        feedback_history: list[str],
+        file_analysis_summary: str | None = None,
+    ) -> PlanningBlueprint:
+        api_key = self._resolve_planning_api_key(session)
+        if not api_key:
+            raise ValueError("OpenRouter API key not configured for AI planning.")
+        model, _ = self.provider.resolve_model(
+            requested_profile=PLANNING_MODEL_PROFILE,
+            requested_model_id=None,
+            require_web_research=False,
+        )
+        output_field_lines = "\n".join(
+            f"- {field.name}: {field.description}" for field in current_output_fields
+        ) or "- none"
+        locked_field_lines = "\n".join(
+            f"- {field.name}: {field.description}" for field in (locked_output_fields or [])
+        ) or "- none"
+        feedback_lines = "\n".join(f"- {item}" for item in feedback_history[-6:]) or "- none"
+        file_summary = file_analysis_summary or "No additional file analysis summary provided."
+        profile_summary = {
+            "entity_type": sheet_profile.get("entity_type"),
+            "columns": sheet_profile.get("columns", []),
+            "candidate_columns": sheet_profile.get("candidate_columns", {}),
+        }
+        user_prompt = (
+            "Plan a spreadsheet enrichment task.\n\n"
+            f"Original task:\n{task}\n\n"
+            "Accepted refinements:\n"
+            f"{feedback_lines}\n\n"
+            "File analyst summary:\n"
+            f"{file_summary}\n\n"
+            f"Selected sheet: {selected_sheet}\n"
+            "Sheet profile:\n"
+            f"{profile_summary}\n\n"
+            "Preview rows:\n"
+            f"{preview_rows[:3]}\n\n"
+            "Current output fields:\n"
+            f"{output_field_lines}\n\n"
+            "Locked output fields:\n"
+            f"{locked_field_lines}\n\n"
+            "Requirements:\n"
+            "- Keep the original task as the stable top-level objective.\n"
+            "- Interpret refinements intelligently and manage output fields accordingly.\n"
+            "- You may create custom output fields that are not in any predefined catalog.\n"
+            "- Output field names must be short, spreadsheet-friendly, and distinct.\n"
+            "- Prompt templates must ask for exactly the returned fields plus a numeric confidence.\n"
+            "- The stricter prompt must prefer blanks over guesses and be more conservative.\n"
+            "- assistant_response must explain what changed in plain language for the user.\n"
+        )
+        try:
+            response = self.provider.structured_json(
+                api_key=api_key,
+                model=model,
+                system_prompt=(
+                    "You are the Enhancer Planning Agent. Use a fast planning model to adapt spreadsheet enrichment "
+                    "plans. Return output fields, prompt templates, and a concise assistant response as valid JSON."
+                ),
+                user_prompt=user_prompt,
+                json_schema=self._planning_blueprint_schema(),
+            )
+            blueprint = PlanningBlueprint.model_validate(response.data)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"AI planning failed: {exc}") from exc
+        sanitized_fields = self._sanitize_output_fields(
+            locked_output_fields or blueprint.output_fields,
+            fallback=current_output_fields,
+        )
+        prompt_template = blueprint.prompt_template.strip()
+        stricter_prompt_template = blueprint.stricter_prompt_template.strip()
+        assistant_response = blueprint.assistant_response.strip()
+        if not prompt_template or not stricter_prompt_template or not assistant_response:
+            raise ValueError("AI planning returned an incomplete plan.")
+        return PlanningBlueprint(
+            output_fields=sanitized_fields,
+            prompt_template=prompt_template,
+            stricter_prompt_template=stricter_prompt_template,
+            assistant_response=assistant_response,
+        )
+
+    def _resolve_planning_api_key(self, session: Session) -> str | None:
+        return self.settings_service.get_openrouter_key(session) or self.settings.openrouter_api_key
+
+    def _sanitize_output_fields(
+        self,
+        fields: list[OutputFieldDefinition],
+        *,
+        fallback: list[OutputFieldDefinition],
+    ) -> list[OutputFieldDefinition]:
+        cleaned: list[OutputFieldDefinition] = []
+        seen: set[str] = set()
+        for field in fields:
+            name = str(field.name).strip()
+            description = str(field.description).strip()
+            if not name or not description or name.lower() == "confidence" or name in seen:
+                continue
+            cleaned.append(
+                OutputFieldDefinition(
+                    name=name[:80],
+                    description=description[:240],
+                    required=field.required,
+                    field_type=field.field_type,
+                )
+            )
+            seen.add(name)
+        return cleaned or [field.model_copy(deep=True) for field in fallback]
+
+    def _planning_blueprint_schema(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "output_fields": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "description": {"type": "string"},
+                            "required": {"type": "boolean"},
+                            "field_type": {"type": "string"},
+                        },
+                        "required": ["name", "description", "required", "field_type"],
+                        "additionalProperties": False,
+                    },
+                },
+                "prompt_template": {"type": "string"},
+                "stricter_prompt_template": {"type": "string"},
+                "assistant_response": {"type": "string"},
+            },
+            "required": [
+                "output_fields",
+                "prompt_template",
+                "stricter_prompt_template",
+                "assistant_response",
+            ],
+            "additionalProperties": False,
+        }
 
     def _select_execution_mode(self, *, task: str, advanced_mode: bool) -> ExecutionMode:
         if (
@@ -350,8 +596,16 @@ class PlanningService:
             selected = [TASK_KEYWORDS["summary"]]
         return selected
 
-    def get_available_output_fields(self) -> list[OutputFieldDefinition]:
-        return [field.model_copy(deep=True) for field in TASK_KEYWORDS.values()]
+    def get_available_output_fields(self, plan: RunPlan | None = None) -> list[OutputFieldDefinition]:
+        ordered: list[OutputFieldDefinition] = [field.model_copy(deep=True) for field in TASK_KEYWORDS.values()]
+        seen = {field.name for field in ordered}
+        if plan:
+            for field in plan.output_fields:
+                if field.name in seen:
+                    continue
+                ordered.append(field.model_copy(deep=True))
+                seen.add(field.name)
+        return ordered
 
     def _infer_input_columns(self, profile_json: dict[str, Any]) -> list[str]:
         candidate_columns = profile_json.get("candidate_columns", {})
@@ -405,13 +659,11 @@ class PlanningService:
             f"{', '.join(filter(None, self._infer_input_columns(profile)))}."
         )
 
-    def _compose_task_text(self, *, run: RunRecord, feedback: str) -> str:
-        history = list(run.metadata_json.get("feedback_history", [])) if isinstance(run.metadata_json, dict) else []
-        refinements = history + [feedback]
-        if not refinements:
-            return run.task
-        lines = "\n".join(f"- {item}" for item in refinements[-6:])
-        return f"{run.task}\n\nAccepted refinements:\n{lines}"
+    def _compose_task_text(self, *, task: str, feedback_history: list[str]) -> str:
+        if not feedback_history:
+            return task
+        lines = "\n".join(f"- {item}" for item in feedback_history[-6:])
+        return f"{task}\n\nAccepted refinements:\n{lines}"
 
     def _append_feedback_history(self, metadata: dict[str, Any], feedback: str) -> dict[str, Any]:
         updated = dict(metadata or {})
@@ -419,6 +671,11 @@ class PlanningService:
         history.append(feedback)
         updated["feedback_history"] = history[-12:]
         return updated
+
+    def _get_feedback_history(self, metadata: dict[str, Any] | None) -> list[str]:
+        if not isinstance(metadata, dict):
+            return []
+        return list(metadata.get("feedback_history", []))
 
     def _apply_feedback_to_output_fields(
         self,
@@ -457,7 +714,9 @@ class PlanningService:
             return [field.model_copy(deep=True) for field in fallback]
         if not names:
             return [TASK_KEYWORDS["summary"].model_copy(deep=True)]
-        catalog = {field.name: field for field in self.get_available_output_fields()}
+        catalog = {field.name: field.model_copy(deep=True) for field in fallback}
+        for field in self.get_available_output_fields():
+            catalog[field.name] = field.model_copy(deep=True)
         resolved = [catalog[name].model_copy(deep=True) for name in names if name in catalog]
         return resolved or [field.model_copy(deep=True) for field in fallback]
 
@@ -473,6 +732,21 @@ class PlanningService:
             + "\n".join(f"- {change}" for change in changes)
             + f"\nCurrent output fields: {', '.join(field.name for field in plan.output_fields)}."
         )
+
+    def _describe_output_field_changes(
+        self,
+        *,
+        before: list[OutputFieldDefinition],
+        after: list[OutputFieldDefinition],
+    ) -> list[str]:
+        before_names = {field.name for field in before}
+        after_names = {field.name for field in after}
+        changes: list[str] = []
+        for name in sorted(after_names - before_names):
+            changes.append(f"Added output field '{name}'.")
+        for name in sorted(before_names - after_names):
+            changes.append(f"Removed output field '{name}'.")
+        return changes
 
     @staticmethod
     def _normalize_feedback(feedback: str) -> str:

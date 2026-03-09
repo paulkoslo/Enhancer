@@ -81,6 +81,14 @@ export type Artifact = {
   created_at: string;
 };
 
+export type RunEvent = {
+  id?: string;
+  type: string;
+  message: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
 export type DraftPlanControls = {
   available_sheets: string[];
   available_output_fields: OutputField[];
@@ -110,13 +118,7 @@ export type RunRecord = {
   draft_controls?: DraftPlanControls | null;
   row_results: RowResult[];
   artifacts: Artifact[];
-  latest_events: Array<{
-    id: string;
-    type: string;
-    message: string;
-    payload: Record<string, unknown>;
-    created_at: string;
-  }>;
+  latest_events: RunEvent[];
 };
 
 export type SettingsResponse = {
@@ -210,6 +212,8 @@ export async function updateDraftPlan(
     enabled_output_fields?: string[];
     model_profile?: string;
     model_id?: string | null;
+    prompt_template?: string | null;
+    stricter_prompt_template?: string | null;
   },
 ): Promise<RunRecord> {
   return request<RunRecord>(`/runs/${runId}/plan/draft`, {

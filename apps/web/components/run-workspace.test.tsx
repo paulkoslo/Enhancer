@@ -5,6 +5,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
 import { RunWorkspace } from "@/components/run-workspace";
+import { ViewModeProvider, type ViewMode } from "@/components/view-mode";
 
 const apiMocks = vi.hoisted(() => ({
   addRunMessage: vi.fn(),
@@ -36,7 +37,11 @@ vi.mock("@/components/run-events", () => ({
   RunEvents: () => <div>events</div>,
 }));
 
-function renderWorkspace(initialRun: Parameters<typeof RunWorkspace>[0]["initialRun"]) {
+function renderWorkspace(
+  initialRun: Parameters<typeof RunWorkspace>[0]["initialRun"],
+  mode: ViewMode = "developer",
+) {
+  window.localStorage.setItem("enhancer:view-mode", mode);
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
@@ -45,12 +50,18 @@ function renderWorkspace(initialRun: Parameters<typeof RunWorkspace>[0]["initial
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <RunWorkspace initialRun={initialRun} />
+      <ViewModeProvider initialMode={mode}>
+        <RunWorkspace initialRun={initialRun} />
+      </ViewModeProvider>
     </QueryClientProvider>,
   );
 }
 
 describe("RunWorkspace", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
   it("shows a dry-run download link and patches draft plan controls", async () => {
     const initialRun = {
       id: "run-1",
@@ -153,7 +164,135 @@ describe("RunWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /View Agent Flow/i }));
 
     expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.getByText(/The visible assistant messages are composed in backend Python code/i)).toBeInTheDocument();
+    expect(screen.getByText(/Chat replies, output fields, and prompt templates now come from the planning model/i)).toBeInTheDocument();
     expect(screen.getByText(/Web Research via OpenRouter/i)).toBeInTheDocument();
+  });
+
+  it("starts with an empty session view even if the run already has history", () => {
+    const initialRun = {
+      id: "run-2",
+      file_id: "file-2",
+      status: "awaiting_plan_approval",
+      execution_mode: "declarative" as const,
+      selected_sheet: "Companies",
+      task: "Research companies",
+      selected_model_profile: "best-quality",
+      selected_model_id: null,
+      requires_research: true,
+      is_advanced_mode: false,
+      created_at: "2026-03-06T10:00:00.000Z",
+      updated_at: "2026-03-06T10:00:00.000Z",
+      messages: [
+        {
+          id: "msg-old-user",
+          role: "user",
+          content: "Old run history",
+          created_at: "2026-03-06T10:00:00.000Z",
+        },
+      ],
+      draft_plan: null,
+      approved_plan: null,
+      draft_controls: null,
+      row_results: [],
+      artifacts: [],
+      latest_events: [
+        {
+          id: "evt-old",
+          type: "status",
+          message: "Old event",
+          created_at: "2026-03-06T10:00:00.000Z",
+          payload: { status: "awaiting_plan_approval" },
+        },
+      ],
+    };
+
+    apiMocks.getRun.mockResolvedValue(initialRun);
+
+    renderWorkspace(initialRun);
+
+    expect(screen.getByText("No chat in this workspace yet.")).toBeInTheDocument();
+    expect(screen.queryByText("Old run history")).not.toBeInTheDocument();
+  });
+
+  it("shows the simplified German primary action in user view", async () => {
+    const initialRun = {
+      id: "run-3",
+      file_id: "file-3",
+      status: "awaiting_plan_approval",
+      execution_mode: "declarative" as const,
+      selected_sheet: "Companies",
+      task: "Research companies",
+      selected_model_profile: "best-quality",
+      selected_model_id: null,
+      requires_research: true,
+      is_advanced_mode: false,
+      created_at: "2026-03-06T10:00:00.000Z",
+      updated_at: "2026-03-06T10:00:00.000Z",
+      messages: [],
+      draft_plan: {
+        execution_mode: "declarative" as const,
+        sheet_name: "Companies",
+        task: "Research companies",
+        input_columns: ["Company Name"],
+        output_fields: [
+          { name: "Website", description: "Official website", required: true, field_type: "string" },
+        ],
+        prompt_template: "Prompt",
+        stricter_prompt_template: "Strict prompt",
+        model_profile: "best-quality",
+        model_id: null,
+        sample_row_indices: [0, 1],
+        research_policy: {},
+        retry_policy: {},
+        budget_policy: {},
+        export_policy: {},
+        notes: ["Research is required"],
+      },
+      approved_plan: null,
+      draft_controls: {
+        available_sheets: ["Companies"],
+        available_output_fields: [
+          { name: "Website", description: "Official website", required: true, field_type: "string" },
+        ],
+        available_model_profiles: [
+          {
+            profile_id: "best-quality",
+            provider: "openrouter",
+            model_id: "openai/gpt-5.4",
+            display_name: "Best Quality",
+            supports_web_research: true,
+            supports_structured_output: true,
+            cost_tier: "premium",
+            latency_tier: "medium",
+            recommended_concurrency: 2,
+          },
+        ],
+        selected_sheet: "Companies",
+        enabled_output_fields: ["Website"],
+        model_profile: "best-quality",
+        model_id: null,
+      },
+      row_results: [],
+      artifacts: [],
+      latest_events: [],
+    };
+
+    apiMocks.getRun.mockResolvedValue(initialRun);
+    apiMocks.approvePlan.mockResolvedValue({ ...initialRun, status: "dry_run_preparing" });
+    apiMocks.startDryRun.mockResolvedValue({ ...initialRun, status: "dry_run_running" });
+
+    renderWorkspace(initialRun, "user");
+
+    expect(screen.getByRole("button", { name: /Plan freigeben und Testlauf starten/i })).toBeInTheDocument();
+    expect(screen.getByText(/Aktueller Plan/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Plan-Entwurf/i).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: /Plan freigeben und Testlauf starten/i }));
+
+    await waitFor(() => {
+      expect(apiMocks.approvePlan).toHaveBeenCalledWith("run-3");
+      expect(apiMocks.startDryRun).toHaveBeenCalledWith("run-3");
+    });
+    expect(screen.getByText(/Lass einen Agenten deinen Plan anpassen/i)).toBeInTheDocument();
   });
 });

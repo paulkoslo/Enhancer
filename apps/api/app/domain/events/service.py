@@ -46,12 +46,14 @@ class EventService:
         agent: str,
         action: str,
         row_index: int | None = None,
+        payload: dict[str, Any] | None = None,
     ):
         payload = {
             "agent": agent,
             "action": action,
             "phase": "start",
             "run_id": run_id,
+            **(payload or {}),
         }
         if row_index is not None:
             payload["row_index"] = row_index
