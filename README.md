@@ -5,7 +5,7 @@ Enhancer is a spreadsheet research app that turns a messy manual workflow into a
 You upload a spreadsheet, describe what you want in plain language, review the plan, test it on sample rows, run it on the full file, and download an enriched workbook with logs and traceable results.
 
 
-[Enhancer mockup](./docs/mockup.jpg)
+![Enhancer mockup](./docs/mockup.jpg)
 
 
 ## What It Does
